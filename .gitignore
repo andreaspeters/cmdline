@@ -1,0 +1,11 @@
+**/*/backup/**/*
+backup/**/*
+cache/**/*
+**/*/lib/**/*
+**/*/.~*
+lib/**/*
+**/appimage/*
+src/*.dbg
+src/*.exe
+src/*.res
+use/*/*
