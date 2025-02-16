@@ -75,7 +75,7 @@ unit uCmdBox;
 interface
 
 uses Classes, SysUtils, ExtCtrls, Controls, Graphics, Forms, LCLType, LCLIntf,
-     lmessages, lresources, ClipBrd, LCLProc;
+     lmessages, lresources, ClipBrd, LCLProc, LAZUtf8;
 
 type
   TCaretType = (cartLine, cartSubBar, cartBigBar, cartUser);
@@ -103,6 +103,7 @@ type
 
   TCmdBox = class(TCustomControl)
   public
+    FStringBuffer: TStringList;
     constructor Create(AComponent: TComponent); override;
     destructor Destroy; override;
     procedure EraseBackground(DC: HDC); override;
@@ -178,7 +179,6 @@ type
     FEscapeCodeType: TEscapeCodeType;
     FEscapeMode: TEscapeMode;
     FEscapeData: string;
-    FStringBuffer: TStringList;
     FAutoFollow: boolean;
     FCurrentAttrib: TCharAttrib;
     FInputAttrib: TCharAttrib;
