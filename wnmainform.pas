@@ -29,7 +29,7 @@ interface
 
 uses
   Classes, SysUtils, LResources, Forms, Graphics, Dialogs, ExtCtrls,LCLType,
-  ucmdbox, StdCtrls, Controls, Buttons, Menus;
+  ucmdbox, StdCtrls, Controls, Buttons, Menus, LAZUtf8;
 
 type
 

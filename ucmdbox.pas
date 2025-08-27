@@ -1122,6 +1122,8 @@ begin
   SAX:=AX;
   SAY:=AY;
   MidWidth := FSumWidth div System.Length(FChars);
+  if MidWidth <= 0 then
+    Exit;
   // Draw background
   LineStart         := 0;
   LineStartSumWidth := 0;
