@@ -7,7 +7,7 @@ a VCL environment.
 
 ## Notice
 
-This is a fork of the Original CMDLine from (Julian Schutsch )[https://wiki.lazarus.freepascal.org/CmdLine].
+This is a fork of the Original CMDLine from [Julian Schutsch](https://wiki.lazarus.freepascal.org/CmdLine).
 
 Changes you can find in CHANGELOG.md
 
