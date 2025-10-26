@@ -154,6 +154,8 @@ type
     FBackGroundColor: TColor;
     FCurrentColor: TColor;
     FCurrentBackGround: TColor;
+    FDefaultColor: TColor;
+    FDefaultBackGround: TColor;
     FFont:      TFont;
     FPassWordChar: TUTF8Char;
     FInputIsPassWord: boolean;
@@ -367,6 +369,7 @@ type
   private
     FFont: TFont;
     FDefaultBackGround: TColor;
+    FDefaultColor: TColor;
   public
     property TabWidth: integer Read FTabWidth Write FTabWidth;
     property PassWordChar: TUTF8Char Read FPassWordChar Write FPassWordChar;
@@ -1948,16 +1951,20 @@ procedure TCmdBox.TextColors(FC, BC: TColor);
 begin
   FCurrentColor      := FC;
   FCurrentBackGround := BC;
+  FDefaultColor      := FC;
+  FDefaultBackGround := BC;
 end;
 
 procedure TCmdBox.TextColor(C: TColor);
 begin
   FCurrentColor := C;
+  FDefaultColor := C;
 end;
 
 procedure TCmdBox.TextBackGround(C: TColor);
 begin
   FCurrentBackGround := C;
+  FDefaultBackGround := C;
 end;
 
 procedure TCmdBox.TranslateScrollBarPosition;
@@ -2753,8 +2760,8 @@ begin
                     '0':
                     begin
                       // No Reset Values know here...just assume
-                      FCurrentColor      := clSilver;
-                      FCurrentBackGround := clBlack;
+                      FCurrentColor      := FDefaultColor;
+                      FCurrentBackGround := FDefaultBackground;
                     end;
                     '7':
                     begin
