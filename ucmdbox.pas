@@ -255,6 +255,7 @@ type
     property BorderSpacing;
     property PopupMenu;
     property Visible;
+    property VerticalScrollbarVisible: boolean Read FVSBVisible Write FVSBVisible default True;
     property HelpType;
     property HelpKeyWord;
     property DragMode;
@@ -2889,7 +2890,7 @@ begin
     begin
       ScrollBarPosition(SB_VERT, 0);
       ScrollBarRange(SB_VERT, 0, FPageHeight);
-      ShowScrollBar(Handle, SB_VERT, True); { Disable the Scrollbar ! }
+      ShowScrollBar(Handle, SB_VERT, FVSBVisible); { Disable the Scrollbar ! }
     end;
   end
   else
@@ -2897,7 +2898,7 @@ begin
     if HandleAllocated then
     begin
       ScrollBarRange(SB_VERT, FVisibleLineCount, FPageHeight);
-      ShowScrollBar(Handle, SB_VERT, True);
+      ShowScrollBar(Handle, SB_VERT, FVSBVisible);
     end;
   end;
   Invalidate;
