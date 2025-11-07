@@ -154,6 +154,8 @@ type
     FBackGroundColor: TColor;
     FCurrentColor: TColor;
     FCurrentBackGround: TColor;
+    FDefaultColor: TColor;
+    FDefaultBackGround: TColor;
     FFont:      TFont;
     FPassWordChar: TUTF8Char;
     FInputIsPassWord: boolean;
@@ -368,6 +370,7 @@ type
   private
     FFont: TFont;
     FDefaultBackGround: TColor;
+    FDefaultColor: TColor;
   public
     property TabWidth: integer Read FTabWidth Write FTabWidth;
     property PassWordChar: TUTF8Char Read FPassWordChar Write FPassWordChar;
@@ -1949,16 +1952,20 @@ procedure TCmdBox.TextColors(FC, BC: TColor);
 begin
   FCurrentColor      := FC;
   FCurrentBackGround := BC;
+  FDefaultColor      := FC;
+  FDefaultBackGround := BC;
 end;
 
 procedure TCmdBox.TextColor(C: TColor);
 begin
   FCurrentColor := C;
+  FDefaultColor := C;
 end;
 
 procedure TCmdBox.TextBackGround(C: TColor);
 begin
   FCurrentBackGround := C;
+  FDefaultBackGround := C;
 end;
 
 procedure TCmdBox.TranslateScrollBarPosition;
@@ -2601,8 +2608,27 @@ begin
 end;
 
 const
-  AnsiColors: array['0'..'7'] of
-    TColor = (clBlack, clRed, clGreen, clYellow, clBlue, clFuchsia, clAqua, clWhite);
+  AnsiColors: array['0'..'7'] of TColor = (
+    TColor($00000000),  // 30 Schwarz       (0,0,0)
+    TColor($000000AA),  // 31 Rot           (170,0,0)
+    TColor($0000AA00),  // 32 Grün          (0,170,0)
+    TColor($0000AAAA),  // 33 Gelb          (170,170,0)
+    TColor($00AA0000),  // 34 Blau          (0,0,170)
+    TColor($00AA00AA),  // 35 Magenta       (170,0,170)
+    TColor($00AAAA00),  // 36 Cyan          (0,170,170)
+    TColor($00AAAAAA)   // 37 Weiß/Grau     (170,170,170)
+  );
+
+  AnsiBrightColors: array['0'..'7'] of TColor = (
+    TColor($00555555),  // 90 Light-Gray (RGB 85,85,85)
+    TColor($005555FF),  // 91 Light-Red   (RGB 255,85,85)
+    TColor($0055FF55),  // 92 Light-Green (RGB 85,255,85)
+    TColor($0055FFFF),  // 93 Light-Yellow (RGB 255,255,85)
+    TColor($00FF5555),  // 94 Light-Blue   (RGB 85,85,255)
+    TColor($00FF55FF),  // 95 Light-Fuchsia (RGB 255,85,255)
+    TColor($00FFFF55),  // 96 Light-Aqua   (RGB 85,255,255)
+    TColor($00FFFFFF)   // 97 White
+  );
 
 procedure TCmdBox.IntWrite;
 var
@@ -2735,8 +2761,8 @@ begin
                     '0':
                     begin
                       // No Reset Values know here...just assume
-                      FCurrentColor      := clSilver;
-                      FCurrentBackGround := clBlack;
+                      FCurrentColor      := FDefaultColor;
+                      FCurrentBackGround := FDefaultBackground;
                     end;
                     '7':
                     begin
@@ -2744,6 +2770,7 @@ begin
                     end;
                     '3': EscSubMode := 3;
                     '4': EscSubMode := 4;
+                    '9': EscSubMode := 9;
                   end;
                 end;
                 1:
@@ -2755,12 +2782,18 @@ begin
                 begin
                   if FEscapeData[EscPos] in ['0'..'7'] then
                     FCurrentColor := AnsiColors[FEscapeData[EscPos]];
-                  EscSubMode      := 1;
+                  EscSubMode := 1;
                 end;
                 4:
                 begin
                   if FEscapeData[EscPos] in ['0'..'7'] then
                     FCurrentBackGround := AnsiColors[FEscapeData[EscPos]];
+                  EscSubMode := 1;
+                end;
+                9:
+                begin
+                  if FEscapeData[EscPos] in ['0'..'7'] then
+                    FCurrentColor := AnsiBrightColors[FEscapeData[EscPos]];
                   EscSubMode := 1;
                 end;
               end;
