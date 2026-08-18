@@ -74,8 +74,9 @@ unit uCmdBox;
 
 interface
 
-uses Classes, SysUtils, ExtCtrls, Controls, Graphics, Forms, LCLType, LCLIntf,
-     lmessages, lresources, ClipBrd, LCLProc, LAZUtf8, ansi_parser;
+uses Classes, SysUtils, Types, ExtCtrls, Controls, Graphics, Forms, LCLType,
+     LCLIntf, lmessages, lresources, ClipBrd, LCLProc, LAZUtf8, ansi_parser,
+     ansi_mouse, cp437_codec;
 
 type
   TCaretType = (cartLine, cartSubBar, cartBigBar, cartUser);
@@ -86,9 +87,13 @@ type
     charaBlink, charaInverse, charaConceal, charaStrike);
   TCharAttrib = set of TCharAttribute;
   TWrapMode = (wwmChar, wwmWord);
+  TAnsiTextEncoding = (ateUTF8, ateCP437);
 
 type
   TCmdBox = class;
+
+  TAnsiMouseReportEvent = procedure(ACmdBox: TCmdBox;
+    const AReport: string) of object;
 
 type
   TColorstring = class;
@@ -122,6 +127,8 @@ type
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; x, y: integer); override;
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState; x, y: integer); override;
     procedure MouseMove(Shift: TShiftState; x, y: integer); override;
+    function DoMouseWheel(Shift: TShiftState; WheelDelta: Integer;
+      MousePos: TPoint): Boolean; override;
   private
     FLock:      System.TRTLCriticalSection;
     FCaretTimer: TTimer;
@@ -195,6 +202,12 @@ type
     FAnsiAutoWrap: boolean;
     FAnsiCursorVisible: boolean;
     FTerminalColumns: integer;
+    FAnsiMouse: TAnsiMouseEncoder;
+    FAnsiPressedButton: integer;
+    FOnAnsiMouseReport: TAnsiMouseReportEvent;
+    FAnsiTextEncoding: TAnsiTextEncoding;
+    FAnsiBBSFontName: string;
+    FAnsiBBSFontSize: integer;
     procedure CaretTimerExecute(Sender: TObject);
     procedure SetLineCount(c: integer);
     procedure SetTopLine(Nr: integer);
@@ -230,6 +243,14 @@ type
     procedure AnsiEraseLine(AMode: integer);
     procedure AnsiEraseDisplay(AMode: integer);
     procedure AnsiScroll(AAmount: integer);
+    function AnsiMouseButtonCode(AButton: TMouseButton): integer;
+    function AnsiMouseModifiers(AShift: TShiftState): integer;
+    procedure AnsiMouseCell(AX, AY: integer; out AColumn, ARow: integer);
+    function EmitAnsiMouse(AKind: TAnsiMouseEventKind; AButton, AX, AY:
+      integer; AShift: TShiftState): boolean;
+    procedure SetAnsiBBSFontName(const AValue: string);
+    procedure SetAnsiBBSFontSize(AValue: integer);
+    function SelectAnsiBBSFont: string;
     procedure SetTerminalColumns(AValue: integer);
     procedure MultiWrite;
     procedure SetCaretType(ACaretType: TCaretType);
@@ -261,6 +282,7 @@ type
     procedure PasteFromClipBoard;
     procedure CutToClipBoard;
     procedure ClearLine;
+    procedure ApplyAnsiBBSDefaults;
     property OutX: integer Read FOutX Write FOutX;
     property OutY: integer Read FOutY Write SetOutY;
     property TopLine: integer Read FTopLine Write SetTopLine;
@@ -310,6 +332,14 @@ type
     property TerminalColumns: integer read FTerminalColumns write SetTerminalColumns default 80;
     property AnsiAutoWrap: boolean read FAnsiAutoWrap write FAnsiAutoWrap default True;
     property AnsiCursorVisible: boolean read FAnsiCursorVisible;
+    property AnsiTextEncoding: TAnsiTextEncoding read FAnsiTextEncoding
+      write FAnsiTextEncoding default ateUTF8;
+    property AnsiBBSFontName: string read FAnsiBBSFontName
+      write SetAnsiBBSFontName;
+    property AnsiBBSFontSize: integer read FAnsiBBSFontSize
+      write SetAnsiBBSFontSize default 12;
+    property OnAnsiMouseReport: TAnsiMouseReportEvent read FOnAnsiMouseReport
+      write FOnAnsiMouseReport;
     property DoubleBuffered default True;
     property OnKeyDown;
     property OnKeyUp;
@@ -1798,15 +1828,19 @@ end;
 
 procedure TCmdBox.WriteStream(Stream: TStream);
 var
-  c: WideString;
+  Buffer: RawByteString;
+  Remaining: Int64;
 begin
-  c:='';
-  while Stream.Position < Stream.Size do
-  begin
-    // Not very efficient, but should work...
-    Stream.Read(c, 1);
-    Write(c);
-  end;
+  Buffer := '';
+  Remaining := Stream.Size - Stream.Position;
+  if Remaining <= 0 then Exit;
+  {$IFNDEF CPU64}
+  if Remaining > High(SizeInt) then
+    raise EStreamError.Create('Stream is too large for a single terminal write');
+  {$ENDIF}
+  SetLength(Buffer, SizeInt(Remaining));
+  Stream.ReadBuffer(Buffer[1], SizeInt(Remaining));
+  Write(Buffer);
 end;
 
 procedure TCmdBox.LeftSelection(Start, Ende: integer);
@@ -1934,8 +1968,78 @@ begin
   end;
 end;
 
-procedure TCmdBox.MouseMove(Shift: TShiftState; x, y: integer);
+function TCmdBox.AnsiMouseButtonCode(AButton: TMouseButton): integer;
 begin
+  case AButton of
+    mbLeft: Result := 0;
+    mbMiddle: Result := 1;
+    mbRight: Result := 2;
+    else Result := -1;
+  end;
+end;
+
+function TCmdBox.AnsiMouseModifiers(AShift: TShiftState): integer;
+begin
+  Result := 0;
+  if ssShift in AShift then Result := Result or 4;
+  if ssAlt in AShift then Result := Result or 8;
+  if ssCtrl in AShift then Result := Result or 16;
+end;
+
+procedure TCmdBox.AnsiMouseCell(AX, AY: integer; out AColumn, ARow: integer);
+var
+  W, H, Rows: integer;
+begin
+  W := FClientWidth;
+  if W < 1 then W := ClientWidth;
+  if W < 1 then W := 1;
+  H := FCharHeight;
+  if H < 1 then H := 1;
+  Rows := (FClientHeight + H - 1) div H;
+  if Rows < 1 then Rows := 1;
+
+  if AX < 0 then AX := 0 else if AX >= W then AX := W - 1;
+  if AY < 0 then AY := 0 else if AY >= FClientHeight then
+    AY := FClientHeight - 1;
+  if AY < 0 then AY := 0;
+  AColumn := (AX * FTerminalColumns) div W + 1;
+  ARow := AY div H + 1;
+  if AColumn < 1 then AColumn := 1
+  else if AColumn > FTerminalColumns then AColumn := FTerminalColumns;
+  if ARow < 1 then ARow := 1 else if ARow > Rows then ARow := Rows;
+end;
+
+function TCmdBox.EmitAnsiMouse(AKind: TAnsiMouseEventKind; AButton, AX,
+  AY: integer; AShift: TShiftState): boolean;
+var
+  Column, Row: integer;
+  Report: string;
+begin
+  Result := False;
+  if (FEscapeCodeType <> esctAnsi) or
+     (FAnsiMouse.TrackingMode = amtNone) then Exit;
+  AnsiMouseCell(AX, AY, Column, Row);
+  Report := FAnsiMouse.Encode(AKind, AButton, Column, Row,
+    AnsiMouseModifiers(AShift));
+  if Report = '' then Exit;
+  Result := True;
+  if Assigned(FOnAnsiMouseReport) then
+    FOnAnsiMouseReport(Self, Report);
+end;
+
+procedure TCmdBox.MouseMove(Shift: TShiftState; x, y: integer);
+var
+  ButtonCode: integer;
+begin
+  if (FEscapeCodeType = esctAnsi) and
+     (FAnsiMouse.TrackingMode <> amtNone) then
+  begin
+    ButtonCode := FAnsiPressedButton;
+    if ButtonCode < 0 then ButtonCode := 3;
+    EmitAnsiMouse(ameMotion, ButtonCode, x, y, Shift);
+    inherited MouseMove(Shift, x, y);
+    Exit;
+  end;
   if FMouseDown then
   begin
     if MoveInputCaretTo(x, y, False) then
@@ -1975,7 +2079,22 @@ begin
 end;
 
 procedure TCmdBox.MouseDown(Button: TMouseButton; Shift: TShiftState; x, y: integer);
+var
+  ButtonCode: integer;
 begin
+  if (FEscapeCodeType = esctAnsi) and
+     (FAnsiMouse.TrackingMode <> amtNone) then
+  begin
+    SetFocus;
+    ButtonCode := AnsiMouseButtonCode(Button);
+    if ButtonCode >= 0 then
+    begin
+      FAnsiPressedButton := ButtonCode;
+      EmitAnsiMouse(amePress, ButtonCode, x, y, Shift);
+    end;
+    inherited MouseDown(Button, Shift, x, y);
+    Exit;
+  end;
   SetFocus;
   MoveInputCaretTo(x, y, True);
   FMouseDown := True;
@@ -1986,9 +2105,38 @@ begin
 end;
 
 procedure TCmdBox.MouseUp(Button: TMouseButton; Shift: TShiftState; x, y: integer);
+var
+  ButtonCode: integer;
 begin
+  if (FEscapeCodeType = esctAnsi) and
+     (FAnsiMouse.TrackingMode <> amtNone) then
+  begin
+    ButtonCode := AnsiMouseButtonCode(Button);
+    if ButtonCode >= 0 then
+      EmitAnsiMouse(ameRelease, ButtonCode, x, y, Shift);
+    if FAnsiPressedButton = ButtonCode then FAnsiPressedButton := -1;
+    inherited MouseUp(Button, Shift, x, y);
+    Exit;
+  end;
   FMouseDown := False;
   inherited MouseUp(Button,Shift,x,y);
+end;
+
+function TCmdBox.DoMouseWheel(Shift: TShiftState; WheelDelta: Integer;
+  MousePos: TPoint): Boolean;
+var
+  ClientPos: TPoint;
+  Handled: Boolean;
+begin
+  Result := inherited DoMouseWheel(Shift, WheelDelta, MousePos);
+  if (FEscapeCodeType <> esctAnsi) or
+     (FAnsiMouse.TrackingMode = amtNone) or (WheelDelta = 0) then Exit;
+  ClientPos := ScreenToClient(MousePos);
+  if WheelDelta > 0 then
+    Handled := EmitAnsiMouse(ameWheelUp, 0, ClientPos.X, ClientPos.Y, Shift)
+  else
+    Handled := EmitAnsiMouse(ameWheelDown, 0, ClientPos.X, ClientPos.Y, Shift);
+  if Handled then Result := True;
 end;
 
 destructor TColorstring.Destroy;
@@ -2131,6 +2279,74 @@ begin
   begin
     FBackGroundColor := c;
     Invalidate;
+  end;
+end;
+
+procedure TCmdBox.SetAnsiBBSFontName(const AValue: string);
+begin
+  if AValue = '' then
+    FAnsiBBSFontName := 'PxPlus IBM VGA8'
+  else
+    FAnsiBBSFontName := AValue;
+end;
+
+procedure TCmdBox.SetAnsiBBSFontSize(AValue: integer);
+begin
+  if AValue < 1 then AValue := 1;
+  FAnsiBBSFontSize := AValue;
+end;
+
+function TCmdBox.SelectAnsiBBSFont: string;
+const
+  Fallbacks: array[0..4] of string = ('Perfect DOS VGA 437', 'Terminus',
+    'DejaVu Sans Mono', 'Courier New', 'Monospace');
+var
+  I: integer;
+  Candidate: string;
+  function Installed(const AName: string): boolean;
+  var K: integer;
+  begin
+    Result := False;
+    if (Screen = nil) or (AName = '') then Exit;
+    for K := 0 to Screen.Fonts.Count - 1 do
+      if AnsiCompareText(Screen.Fonts[K], AName) = 0 then Exit(True);
+  end;
+begin
+  if Installed(FAnsiBBSFontName) then Exit(FAnsiBBSFontName);
+  for I := Low(Fallbacks) to High(Fallbacks) do
+  begin
+    Candidate := Fallbacks[I];
+    if Installed(Candidate) then Exit(Candidate);
+  end;
+
+  { A non-initialized widget set cannot enumerate fonts. Keep the configured
+    name in that case and let the platform font mapper choose its fallback. }
+  Result := FAnsiBBSFontName;
+  if Result = '' then Result := 'Monospace';
+end;
+
+procedure TCmdBox.ApplyAnsiBBSDefaults;
+var
+  BBSFont: TFont;
+begin
+  FEscapeCodeType := esctAnsi;
+  FAnsiTextEncoding := ateCP437;
+  SetTerminalColumns(80);
+  SetWrapMode(wwmChar);
+  SetBackGroundColor(clBlack);
+  TextColors(clSilver, clBlack);
+
+  BBSFont := TFont.Create;
+  try
+    BBSFont.Assign(FFont);
+    BBSFont.Name := SelectAnsiBBSFont;
+    BBSFont.Size := FAnsiBBSFontSize;
+    BBSFont.Pitch := fpFixed;
+    BBSFont.Quality := fqNonAntialiased;
+    BBSFont.Style := [];
+    SetFont(BBSFont);
+  finally
+    BBSFont.Free;
   end;
 end;
 
@@ -2819,6 +3035,7 @@ begin
       'c': begin
         Clear; FCurrentColor := FDefaultColor; FCurrentBackground := FDefaultBackground;
         FCurrentAttrib := []; FAnsiAutoWrap := True; FAnsiCursorVisible := True;
+        FAnsiMouse.Reset; FAnsiPressedButton := -1;
       end;
     end;
     Exit;
@@ -2830,6 +3047,13 @@ begin
       case ASequence.Params[I] of
         7: FAnsiAutoWrap := ASequence.FinalChar = 'h';
         25: FAnsiCursorVisible := ASequence.FinalChar = 'h';
+        9, 1000, 1002, 1003, 1006:
+          begin
+            FAnsiMouse.SetPrivateMode(ASequence.Params[I],
+              ASequence.FinalChar = 'h');
+            if FAnsiMouse.TrackingMode = amtNone then
+              FAnsiPressedButton := -1;
+          end;
       end;
     Exit;
   end;
@@ -2910,6 +3134,7 @@ end;
 
 procedure TCmdBox.AnsiWrite(const S: string);
 var Pp, L: integer; Seq: TAnsiSequence; FC, BC: TColor;
+  Glyph: UTF8String;
 begin
   Pp:=1;
   while Pp<=Length(S) do
@@ -2919,8 +3144,17 @@ begin
       if FAnsiParser.Feed(S[Pp],Seq) then ExecuteAnsi(Seq);
       Inc(Pp); Continue;
     end;
-    L:=UTF8CharacterLength(@S[Pp]);
-    if L<1 then L:=1;
+    if FAnsiTextEncoding = ateCP437 then
+    begin
+      L := 1;
+      Glyph := CP437DecodeByte(Byte(S[Pp]));
+    end
+    else
+    begin
+      L:=UTF8CharacterLength(@S[Pp]);
+      if L<1 then L:=1;
+      Glyph := Copy(S, Pp, L);
+    end;
     if L=1 then case S[Pp] of
       #7: ;
       #8: if FOutX>0 then Dec(FOutX);
@@ -2932,14 +3166,14 @@ begin
         FC:=FCurrentColor; BC:=FCurrentBackground;
         if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
         if charaConceal in FCurrentAttrib then FC:=BC;
-        FLines[FOutY].OverWrite(S[Pp],FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
+        FLines[FOutY].OverWrite(Glyph,FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
       end
     end else begin
       if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
       FC:=FCurrentColor; BC:=FCurrentBackground;
       if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
       if charaConceal in FCurrentAttrib then FC:=BC;
-      FLines[FOutY].OverWrite(Copy(S,Pp,L),FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
+      FLines[FOutY].OverWrite(Glyph,FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
     end;
     Inc(Pp,L)
   end;
@@ -3392,9 +3626,14 @@ begin
   FInputVisible     := False;
   FWriteInput       := True;
   FAnsiParser       := TAnsiParser.Create;
+  FAnsiMouse        := TAnsiMouseEncoder.Create;
+  FAnsiPressedButton := -1;
   FAnsiAutoWrap     := True;
   FAnsiCursorVisible := True;
   FTerminalColumns  := 80;
+  FAnsiTextEncoding := ateUTF8;
+  FAnsiBBSFontName  := 'PxPlus IBM VGA8';
+  FAnsiBBSFontSize  := 12;
   FBackGroundColor  := clBlack;
   FGraphicCharWidth := 10;
   FWrapMode         := wwmWord;
@@ -3452,6 +3691,7 @@ begin
   System.DoneCriticalSection(FLock);
   FStringBuffer.Free;
   FAnsiParser.Free;
+  FAnsiMouse.Free;
   for i := 0 to FLineCount - 1 do FLines[i].Free;
   for i := 0 to FHistoryMax - 1 do FHistory[i].Free;
   FInputBuffer.Free;
