@@ -75,14 +75,16 @@ unit uCmdBox;
 interface
 
 uses Classes, SysUtils, ExtCtrls, Controls, Graphics, Forms, LCLType, LCLIntf,
-     lmessages, lresources, ClipBrd, LCLProc, LAZUtf8;
+     lmessages, lresources, ClipBrd, LCLProc, LAZUtf8, ansi_parser;
 
 type
   TCaretType = (cartLine, cartSubBar, cartBigBar, cartUser);
   TEscapeCodeType = (esctCmdBox, esctAnsi, esctNone);
   TEscapeMode = (escmNone, escmOperation, escmData2, escmData1,
     escmAnsiOperation, escmAnsiSquare);
-  TCharAttrib = (charaUnderline, charaItalic, charaBold, charaBlink);
+  TCharAttribute = (charaUnderline, charaItalic, charaBold, charaFaint,
+    charaBlink, charaInverse, charaConceal, charaStrike);
+  TCharAttrib = set of TCharAttribute;
   TWrapMode = (wwmChar, wwmWord);
 
 type
@@ -186,6 +188,13 @@ type
     FInputAttrib: TCharAttrib;
     FWrapMode:  TWrapMode;
     FWriteInput: Boolean;
+    FAnsiParser: TAnsiParser;
+    FAnsiSavedX, FAnsiSavedY: integer;
+    FAnsiSavedColor, FAnsiSavedBackground: TColor;
+    FAnsiSavedAttrib: TCharAttrib;
+    FAnsiAutoWrap: boolean;
+    FAnsiCursorVisible: boolean;
+    FTerminalColumns: integer;
     procedure CaretTimerExecute(Sender: TObject);
     procedure SetLineCount(c: integer);
     procedure SetTopLine(Nr: integer);
@@ -214,6 +223,14 @@ type
     procedure DeleteSelected;
     procedure SetOutY(v: integer);
     procedure IntWrite;
+    procedure AnsiWrite(const S: string);
+    procedure ExecuteAnsi(const ASequence: TAnsiSequence);
+    procedure AnsiLineFeed;
+    procedure AnsiReverseIndex;
+    procedure AnsiEraseLine(AMode: integer);
+    procedure AnsiEraseDisplay(AMode: integer);
+    procedure AnsiScroll(AAmount: integer);
+    procedure SetTerminalColumns(AValue: integer);
     procedure MultiWrite;
     procedure SetCaretType(ACaretType: TCaretType);
     procedure SetCaretWidth(AValue: integer);
@@ -290,6 +307,9 @@ type
     property AutoFollow: boolean Read FAutoFollow Write FAutoFollow default True;
     property WrapMode: TWrapMode Read FWrapMode Write SetWrapMode default wwmWord;
     property WriteInput:Boolean read FWriteInput write FWriteInput default True;
+    property TerminalColumns: integer read FTerminalColumns write SetTerminalColumns default 80;
+    property AnsiAutoWrap: boolean read FAnsiAutoWrap write FAnsiAutoWrap default True;
+    property AnsiCursorVisible: boolean read FAnsiCursorVisible;
     property DoubleBuffered default True;
     property OnKeyDown;
     property OnKeyUp;
@@ -355,7 +375,7 @@ type
     procedure LineOutAndFill(ACanvas: TCanvas;
       AX, AY, ALeftX, AWrapWidth, ACH, ACB, ACaretPos: integer;
       ABC, ACC: TColor; ACaretHeight, ACaretWidth, ACaretYShift: integer;
-      ADrawCaret: boolean);
+      ADrawCaret, ABlinkVisible: boolean);
     function Getstring: string;
     function GetPartstring(Start, Ende: integer): string;
     procedure Delete(Index: integer);
@@ -595,10 +615,20 @@ begin
   FCaretType := ACaretType;
 end;
 
+function FontStylesForAttrib(const A: TCharAttrib): TFontStyles;
+begin
+  Result := [];
+  if charaBold in A then Include(Result, fsBold);
+  if charaItalic in A then Include(Result, fsItalic);
+  if charaUnderline in A then Include(Result, fsUnderline);
+  if charaStrike in A then Include(Result, fsStrikeOut);
+end;
+
 // TOdo : Use string buffer instead of string (speed improvement expected)
 procedure TColorString.LineOutAndFill(ACanvas: TCanvas;
   AX, AY, ALeftX, AWrapWidth, ACH, ACB, ACaretPos: integer; ABC, ACC: TColor;
-  ACaretHeight, ACaretWidth, ACaretYShift: integer; ADrawCaret: boolean);
+  ACaretHeight, ACaretWidth, ACaretYShift: integer; ADrawCaret,
+  ABlinkVisible: boolean);
 var
   LineStart         : integer;
   LineEnd           : integer;
@@ -618,6 +648,7 @@ var
     SameBackColor: TColor;
     SameColorX: integer;
     SameColorWidth: integer;
+    SameAttrib: TCharAttrib;
     LP:     integer;
     CaretX: integer;
     CaretW: integer;
@@ -634,6 +665,7 @@ var
     SameForeColor := 0;
     SameColorX := 0;
     SameColorWidth := 0;
+    SameAttrib := [];
     ACanvas.Brush.Style := bsClear;
     // A thing for older versions!
     ACanvas.Font.GetTextWidth('%%%_$%_Hallo\\\\\\\\\32489738');
@@ -650,6 +682,7 @@ var
           if SameColor <> '' then
           begin
             ACanvas.Font.Color  := SameForeColor;
+            ACanvas.Font.Style := FontStylesForAttrib(SameAttrib);
             ACanvas.TextOut(SameColorX, AY, SameColor);
             Inc(SameColorX, SameColorWidth);
             SameColor := '';
@@ -663,6 +696,7 @@ var
           if SameColor <> '' then
           begin
             ACanvas.Font.Color  := SameForeColor;
+            ACanvas.Font.Style := FontStylesForAttrib(SameAttrib);
             ACanvas.TextOut(SameColorX, AY, SameColor);
             Inc(SameColorX, SameColorWidth);
             SameColor := '';
@@ -816,16 +850,21 @@ var
           end
           else
           begin
-            SameColor      := FChar;
+            if (charaBlink in FAttrib) and (not ABlinkVisible) then
+              SameColor := ' '
+            else
+              SameColor := FChar;
             SameColorWidth := FCharWidth;
           end;
           SameColorX    := AX;
           SameForeColor := FFrontColor;
           SameBackColor := FBackColor;
+          SameAttrib := FAttrib;
         end
         else
         begin
-          if (SameForeColor = FFrontColor) and (SameBackColor = FBackColor) then
+          if (SameForeColor = FFrontColor) and (SameBackColor = FBackColor) and
+             (SameAttrib = FAttrib) then
           begin
             if (LP >= FPassWordStart) then
             begin
@@ -834,13 +873,17 @@ var
             end
             else
             begin
-              SameColor := SameColor + FChar;
+              if (charaBlink in FAttrib) and (not ABlinkVisible) then
+                SameColor := SameColor + ' '
+              else
+                SameColor := SameColor + FChar;
               Inc(SameColorWidth, FCharWidth);
             end;
           end
           else
           begin
             ACanvas.Font.Color  := SameForeColor;
+            ACanvas.Font.Style := FontStylesForAttrib(SameAttrib);
             ACanvas.TextOut(SameColorX, AY, SameColor);
             if (LP >= FPassWordStart) then
             begin
@@ -849,11 +892,15 @@ var
             end
             else
             begin
-              SameColor      := FChar;
+              if (charaBlink in FAttrib) and (not ABlinkVisible) then
+                SameColor := ' '
+              else
+                SameColor := FChar;
               SameColorWidth := FCharWidth;
             end;
             SameForeColor := FFrontColor;
             SameBackColor := FBackColor;
+            SameAttrib := FAttrib;
             SameColorX    := AX;
           end;
         end;
@@ -870,6 +917,7 @@ var
     if SameColor <> '' then
     begin
       ACanvas.Font.Color  := SameForeColor;
+      ACanvas.Font.Style := FontStylesForAttrib(SameAttrib);
       ACanvas.TextOut(SameColorX, AY, SameColor);
     end;
     AX := ALeftX;
@@ -892,6 +940,7 @@ var
     SameBackColor: TColor;
     SameColorX: integer;
     SameColorWidth: integer;
+    SameAttrib: TCharAttrib;
     LP:     integer;
     CW:     integer;
   begin
@@ -905,6 +954,7 @@ var
     SameBackColor := 0;
     SameColorX := 0;
     SameColorWidth := 0;
+    SameAttrib := [];
     ACanvas.Brush.Style := bsSolid;
     // A thing for older versions!
     ACanvas.Font.GetTextWidth('%%%_$%_Hallo\\\\\\\\\32489738');
@@ -1055,16 +1105,21 @@ var
           end
           else
           begin
-            SameColor      := FChar;
+            if (charaBlink in FAttrib) and (not ABlinkVisible) then
+              SameColor := ' '
+            else
+              SameColor := FChar;
             SameColorWidth := FCharWidth;
           end;
           SameColorX    := AX;
           SameForeColor := FFrontColor;
           SameBackColor := FBackColor;
+          SameAttrib := FAttrib;
         end
         else
         begin
-          if (SameForeColor = FFrontColor) and (SameBackColor = FBackColor) then
+          if (SameForeColor = FFrontColor) and (SameBackColor = FBackColor) and
+             (SameAttrib = FAttrib) then
           begin
             if (LP >= FPassWordStart) then
             begin
@@ -1073,7 +1128,10 @@ var
             end
             else
             begin
-              SameColor := SameColor + FChar;
+              if (charaBlink in FAttrib) and (not ABlinkVisible) then
+                SameColor := SameColor + ' '
+              else
+                SameColor := SameColor + FChar;
               Inc(SameColorWidth, FCharWidth);
             end;
           end
@@ -1088,11 +1146,15 @@ var
             end
             else
             begin
-              SameColor      := FChar;
+              if (charaBlink in FAttrib) and (not ABlinkVisible) then
+                SameColor := ' '
+              else
+                SameColor := FChar;
               SameColorWidth := FCharWidth;
             end;
             SameForeColor := FFrontColor;
             SameBackColor := FBackColor;
+            SameAttrib := FAttrib;
             SameColorX    := AX;
           end;
         end;
@@ -1628,12 +1690,12 @@ end;
 
 function TCmdBox.GetCaretInterval: integer;
 begin
-  Result := FCaretTimer.Interval;
+  if Assigned(FCaretTimer) then Result := FCaretTimer.Interval else Result := 500;
 end;
 
 procedure TCmdBox.SetCaretInterval(AValue: integer);
 begin
-  FCaretTimer.Interval := AValue;
+  if Assigned(FCaretTimer) then FCaretTimer.Interval := AValue;
 end;
 
 procedure TCmdBox.MultiWrite;
@@ -2630,6 +2692,263 @@ const
     TColor($00FFFFFF)   // 97 White
   );
 
+function Ansi256Color(AIndex: integer): TColor;
+var R, G, B, N: integer;
+begin
+  if AIndex < 0 then AIndex := 0 else if AIndex > 255 then AIndex := 255;
+  if AIndex < 8 then Exit(AnsiColors[Chr(Ord('0') + AIndex)]);
+  if AIndex < 16 then Exit(AnsiBrightColors[Chr(Ord('0') + AIndex - 8)]);
+  if AIndex < 232 then
+  begin
+    N := AIndex - 16;
+    R := N div 36; G := (N div 6) mod 6; B := N mod 6;
+    if R = 0 then R := 0 else R := 55 + R * 40;
+    if G = 0 then G := 0 else G := 55 + G * 40;
+    if B = 0 then B := 0 else B := 55 + B * 40;
+  end
+  else begin R := 8 + (AIndex - 232) * 10; G := R; B := R end;
+  Result := RGBToColor(R, G, B);
+end;
+
+procedure TCmdBox.SetTerminalColumns(AValue: integer);
+begin
+  if AValue < 1 then AValue := 1;
+  FTerminalColumns := AValue;
+end;
+
+procedure TCmdBox.AnsiLineFeed;
+begin
+  AdjustLineHeight(FOutY);
+  Inc(FOutY);
+  if FOutY >= FLineCount then
+  begin
+    ScrollUp;
+    FOutY := FLineCount - 1;
+  end;
+end;
+
+procedure TCmdBox.AnsiReverseIndex;
+var I: integer;
+begin
+  if FOutY > 0 then Dec(FOutY)
+  else
+  begin
+    for I := FLineCount - 1 downto 1 do
+    begin
+      FLines[I].Clear;
+      FLines[I].OverWrite(FLines[I - 1], 0);
+    end;
+    FLines[0].Clear;
+  end;
+end;
+
+procedure TCmdBox.AnsiScroll(AAmount: integer);
+var I, J: integer;
+begin
+  if AAmount > 0 then
+    for I := 1 to AAmount do ScrollUp
+  else
+    for J := 1 to -AAmount do
+    begin
+      for I := FLineCount - 1 downto 1 do
+      begin
+        FLines[I].Clear;
+        FLines[I].OverWrite(FLines[I - 1], 0);
+      end;
+      FLines[0].Clear;
+    end;
+end;
+
+procedure TCmdBox.AnsiEraseLine(AMode: integer);
+var I, N: integer;
+begin
+  case AMode of
+    1: begin N := FOutX + 1; for I := 0 to N - 1 do
+         FLines[FOutY].OverWrite(' ', I, FCurrentColor, FCurrentBackground, FCurrentAttrib) end;
+    2: FLines[FOutY].Clear;
+    else if FOutX < FLines[FOutY].Length then
+      FLines[FOutY].Delete(FOutX, FLines[FOutY].Length - FOutX);
+  end;
+end;
+
+procedure TCmdBox.AnsiEraseDisplay(AMode: integer);
+var I: integer;
+begin
+  case AMode of
+    1: begin
+         for I := 0 to FOutY - 1 do FLines[I].Clear;
+         AnsiEraseLine(1);
+       end;
+    2, 3: for I := 0 to FLineCount - 1 do FLines[I].Clear;
+    else begin
+      AnsiEraseLine(0);
+      for I := FOutY + 1 to FLineCount - 1 do FLines[I].Clear;
+    end;
+  end;
+end;
+
+procedure TCmdBox.ExecuteAnsi(const ASequence: TAnsiSequence);
+var I, N, P, X, Y: integer; FC, BC: TColor;
+  function Param(AIndex, ADefault: integer; AZeroIsDefault: boolean = False): integer;
+  begin
+    if (AIndex >= Length(ASequence.Params)) or (ASequence.Params[AIndex] < 0) then Exit(ADefault);
+    Result := ASequence.Params[AIndex];
+    if AZeroIsDefault and (Result = 0) then Result := ADefault;
+  end;
+  procedure SaveCursor;
+  begin
+    FAnsiSavedX := FOutX; FAnsiSavedY := FOutY;
+    FAnsiSavedColor := FCurrentColor; FAnsiSavedBackground := FCurrentBackground;
+    FAnsiSavedAttrib := FCurrentAttrib;
+  end;
+  procedure RestoreCursor;
+  begin
+    FOutX := FAnsiSavedX; FOutY := FAnsiSavedY;
+    FCurrentColor := FAnsiSavedColor; FCurrentBackground := FAnsiSavedBackground;
+    FCurrentAttrib := FAnsiSavedAttrib;
+  end;
+begin
+  if ASequence.Kind = askEscape then
+  begin
+    case ASequence.FinalChar of
+      '7': SaveCursor;
+      '8': RestoreCursor;
+      'D': AnsiLineFeed;
+      'M': AnsiReverseIndex;
+      'E': begin FOutX := 0; AnsiLineFeed end;
+      'c': begin
+        Clear; FCurrentColor := FDefaultColor; FCurrentBackground := FDefaultBackground;
+        FCurrentAttrib := []; FAnsiAutoWrap := True; FAnsiCursorVisible := True;
+      end;
+    end;
+    Exit;
+  end;
+  if ASequence.Kind <> askCSI then Exit;
+  if (ASequence.PrivateMarker = '?') and (ASequence.FinalChar in ['h','l']) then
+  begin
+    for I := 0 to High(ASequence.Params) do
+      case ASequence.Params[I] of
+        7: FAnsiAutoWrap := ASequence.FinalChar = 'h';
+        25: FAnsiCursorVisible := ASequence.FinalChar = 'h';
+      end;
+    Exit;
+  end;
+  case ASequence.FinalChar of
+    'A': begin N := Param(0,1,True); Dec(FOutY,N); if FOutY < 0 then FOutY := 0 end;
+    'B','e': begin N := Param(0,1,True); Inc(FOutY,N); if FOutY >= FLineCount then FOutY := FLineCount-1 end;
+    'C','a': begin Inc(FOutX,Param(0,1,True)); if FOutX >= FTerminalColumns then FOutX := FTerminalColumns-1 end;
+    'D': begin Dec(FOutX,Param(0,1,True)); if FOutX < 0 then FOutX := 0 end;
+    'E': begin Inc(FOutY,Param(0,1,True)); if FOutY >= FLineCount then FOutY:=FLineCount-1; FOutX:=0 end;
+    'F': begin Dec(FOutY,Param(0,1,True)); if FOutY<0 then FOutY:=0; FOutX:=0 end;
+    'G','`': begin FOutX:=Param(0,1,True)-1; if FOutX>=FTerminalColumns then FOutX:=FTerminalColumns-1 end;
+    'd': begin FOutY:=Param(0,1,True)-1; if FOutY>=FLineCount then FOutY:=FLineCount-1 end;
+    'H','f': begin
+      Y:=Param(0,1,True)-1; X:=Param(1,1,True)-1;
+      if Y<0 then Y:=0 else if Y>=FLineCount then Y:=FLineCount-1;
+      if X<0 then X:=0 else if X>=FTerminalColumns then X:=FTerminalColumns-1;
+      FOutY:=Y; FOutX:=X;
+    end;
+    'J': AnsiEraseDisplay(Param(0,0));
+    'K': AnsiEraseLine(Param(0,0));
+    '@': for I:=1 to Param(0,1,True) do FLines[FOutY].Insert(FOutX,' ',FCurrentColor,FCurrentBackground,FCurrentAttrib);
+    'P': begin N:=Param(0,1,True); if FOutX<FLines[FOutY].Length then FLines[FOutY].Delete(FOutX,N) end;
+    'X': for I:=0 to Param(0,1,True)-1 do FLines[FOutY].OverWrite(' ',FOutX+I,FCurrentColor,FCurrentBackground,FCurrentAttrib);
+    'L': begin
+      N:=Param(0,1,True);
+      while N>0 do begin
+        for I:=FLineCount-1 downto FOutY+1 do begin FLines[I].Clear; FLines[I].OverWrite(FLines[I-1],0) end;
+        FLines[FOutY].Clear; Dec(N)
+      end
+    end;
+    'M': begin
+      N:=Param(0,1,True);
+      while N>0 do begin
+        for I:=FOutY to FLineCount-2 do begin FLines[I].Clear; FLines[I].OverWrite(FLines[I+1],0) end;
+        FLines[FLineCount-1].Clear; Dec(N)
+      end
+    end;
+    'S': AnsiScroll(Param(0,1,True));
+    'T': AnsiScroll(-Param(0,1,True));
+    's': SaveCursor;
+    'u': RestoreCursor;
+    'm': begin
+      I:=0;
+      repeat
+        P:=Param(I,0);
+        case P of
+          0: begin FCurrentColor:=FDefaultColor; FCurrentBackground:=FDefaultBackground; FCurrentAttrib:=[] end;
+          1: Include(FCurrentAttrib,charaBold); 2: Include(FCurrentAttrib,charaFaint);
+          3: Include(FCurrentAttrib,charaItalic); 4: Include(FCurrentAttrib,charaUnderline);
+          5,6: Include(FCurrentAttrib,charaBlink); 7: Include(FCurrentAttrib,charaInverse);
+          8: Include(FCurrentAttrib,charaConceal); 9: Include(FCurrentAttrib,charaStrike);
+          22: begin Exclude(FCurrentAttrib,charaBold); Exclude(FCurrentAttrib,charaFaint) end;
+          23: Exclude(FCurrentAttrib,charaItalic); 24: Exclude(FCurrentAttrib,charaUnderline);
+          25: Exclude(FCurrentAttrib,charaBlink); 27: Exclude(FCurrentAttrib,charaInverse);
+          28: Exclude(FCurrentAttrib,charaConceal); 29: Exclude(FCurrentAttrib,charaStrike);
+          30..37: FCurrentColor:=AnsiColors[Chr(Ord('0')+P-30)];
+          39: FCurrentColor:=FDefaultColor;
+          40..47: FCurrentBackground:=AnsiColors[Chr(Ord('0')+P-40)];
+          49: FCurrentBackground:=FDefaultBackground;
+          90..97: FCurrentColor:=AnsiBrightColors[Chr(Ord('0')+P-90)];
+          100..107: FCurrentBackground:=AnsiBrightColors[Chr(Ord('0')+P-100)];
+          38,48: begin
+            FC:=FCurrentColor; BC:=FCurrentBackground;
+            if Param(I+1,-1)=5 then begin
+              if P=38 then FC:=Ansi256Color(Param(I+2,0)) else BC:=Ansi256Color(Param(I+2,0)); Inc(I,2)
+            end else if Param(I+1,-1)=2 then begin
+              N:=RGBToColor(Param(I+2,0),Param(I+3,0),Param(I+4,0));
+              if P=38 then FC:=N else BC:=N; Inc(I,4)
+            end;
+            FCurrentColor:=FC; FCurrentBackground:=BC;
+          end;
+        end;
+        Inc(I)
+      until I>=Length(ASequence.Params);
+    end;
+  end;
+end;
+
+procedure TCmdBox.AnsiWrite(const S: string);
+var Pp, L: integer; Seq: TAnsiSequence; FC, BC: TColor;
+begin
+  Pp:=1;
+  while Pp<=Length(S) do
+  begin
+    if (FAnsiParser.State<>apsGround) or (S[Pp]=#27) then
+    begin
+      if FAnsiParser.Feed(S[Pp],Seq) then ExecuteAnsi(Seq);
+      Inc(Pp); Continue;
+    end;
+    L:=UTF8CharacterLength(@S[Pp]);
+    if L<1 then L:=1;
+    if L=1 then case S[Pp] of
+      #7: ;
+      #8: if FOutX>0 then Dec(FOutX);
+      #9: begin FOutX:=((FOutX div 8)+1)*8; if FOutX>=FTerminalColumns then FOutX:=FTerminalColumns-1 end;
+      #10,#11,#12: AnsiLineFeed;
+      #13: FOutX:=0;
+      else begin
+        if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
+        FC:=FCurrentColor; BC:=FCurrentBackground;
+        if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
+        if charaConceal in FCurrentAttrib then FC:=BC;
+        FLines[FOutY].OverWrite(S[Pp],FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
+      end
+    end else begin
+      if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
+      FC:=FCurrentColor; BC:=FCurrentBackground;
+      if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
+      if charaConceal in FCurrentAttrib then FC:=BC;
+      FLines[FOutY].OverWrite(Copy(S,Pp,L),FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
+    end;
+    Inc(Pp,L)
+  end;
+  FCaretX:=FOutX;
+  MakeOutVisible;
+  AdjustLineHeight(FOutY);
+  AdjustScrollBars;
+end;
+
 procedure TCmdBox.IntWrite;
 var
   Pp:     integer;
@@ -2639,6 +2958,7 @@ var
   EscSubMode: integer;
 begin
   S    := FCurrentString;
+  if FEscapeCodeType=esctAnsi then begin AnsiWrite(S); Exit end;
   Pp   := 1;
   while Pp <= Length(S) do
   begin
@@ -2994,20 +3314,22 @@ begin
     begin
       FLines[CurrentLine].LineOutAndFill(Canvas, 0, y * FCharHeight, 0,
         FClientWidth, FCharHeight, FGraphicCharWidth, -1, FBackGroundColor, FCaretColor,
-        FCaretHeight, FCaretWidth, FCaretYShift, False);
+        FCaretHeight, FCaretWidth, FCaretYShift, False, FCaretVisible);
       if (FInput) and (FInputY = CurrentLine) then
       begin
         if FInputIsPassWord then
         begin
           FInputBuffer.LineOutAndFill(Canvas, 0, y * FCharHeight, 0, FClientWidth,
             FCharHeight, FGraphicCharWidth, FCaretX, FBackGroundColor, FCaretColor,
-            FCaretHeight, FCaretWidth, FCaretYShift, FCaretVisible and Focused);
+            FCaretHeight, FCaretWidth, FCaretYShift,
+            FCaretVisible and Focused and FAnsiCursorVisible, FCaretVisible);
         end
         else
         begin
           FInputBuffer.LineOutAndFill(Canvas, 0, y * FCharHeight, 0, FClientWidth,
             FCharHeight, FGraphicCharWidth, FCaretX, FBackGroundColor, FCaretColor,
-            FCaretHeight, FCaretWidth, FCaretYShift, FCaretVisible and Focused);
+            FCaretHeight, FCaretWidth, FCaretYShift,
+            FCaretVisible and Focused and FAnsiCursorVisible, FCaretVisible);
         end;
       end;
       Inc(y, FLineHeights[CurrentLine]);
@@ -3025,13 +3347,11 @@ end;
 
 procedure TCmdBox.CaretTimerExecute(Sender: TObject);
 begin
-  if Focused then
-  begin
-    if not Assigned(WakeMainThread) then
-      MultiWrite;
-    FCaretVisible := not FCaretVisible;
-    Invalidate;
-  end;
+  if not Assigned(WakeMainThread) then
+    MultiWrite;
+  FCaretVisible := not FCaretVisible;
+  { The same phase drives both the caret and ANSI SGR blink. }
+  Invalidate;
 end;
 
 procedure TCmdBox.CreateWnd;
@@ -3071,6 +3391,10 @@ begin
   FLineCount        := 1000;
   FInputVisible     := False;
   FWriteInput       := True;
+  FAnsiParser       := TAnsiParser.Create;
+  FAnsiAutoWrap     := True;
+  FAnsiCursorVisible := True;
+  FTerminalColumns  := 80;
   FBackGroundColor  := clBlack;
   FGraphicCharWidth := 10;
   FWrapMode         := wwmWord;
@@ -3089,15 +3413,22 @@ begin
     FLines[i].TabWidth          := FTabWidth;
     FLines[i].FWrapMode         := FWrapMode;
   end;
+  {$IFDEF LCLnogui}
+  FCaretTimer := nil;
+  {$ELSE}
   FCaretTimer          := TTimer.Create(self);
   FCaretTimer.Interval := 500;
   FCaretTimer.OnTimer  := @carettimerexecute;
   FCaretTimer.Enabled  := True;
+  {$ENDIF}
   FCaretVisible        := True;
   FVSBVisible          := True;
   FFont                := Canvas.Font;
   FCurrentColor        := clSilver;
   FCurrentBackground   := clBlack;
+  FDefaultColor        := clSilver;
+  FDefaultBackground   := clBlack;
+  FCurrentAttrib       := [];
   DoubleBuffered       := True;
   FFont.Color          := ClSilver;
   FCaretColor          := clWhite;
@@ -3117,9 +3448,10 @@ end;
 destructor TCmdBox.Destroy;
 var i : integer;
 begin
-  FCaretTimer.Enabled := False;
+  if Assigned(FCaretTimer) then FCaretTimer.Enabled := False;
   System.DoneCriticalSection(FLock);
   FStringBuffer.Free;
+  FAnsiParser.Free;
   for i := 0 to FLineCount - 1 do FLines[i].Free;
   for i := 0 to FHistoryMax - 1 do FHistory[i].Free;
   FInputBuffer.Free;
