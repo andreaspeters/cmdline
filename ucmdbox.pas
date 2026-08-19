@@ -3057,6 +3057,10 @@ begin
       end;
     Exit;
   end;
+  // Private CSI sequences not handled above must not fall through to the
+  // standard CSI dispatch. In particular, an echoed SGR mouse report such as
+  // CSI < 64 ; x ; y M would otherwise be interpreted as "delete 64 lines".
+  if ASequence.PrivateMarker <> #0 then Exit;
   case ASequence.FinalChar of
     'A': begin N := Param(0,1,True); Dec(FOutY,N); if FOutY < 0 then FOutY := 0 end;
     'B','e': begin N := Param(0,1,True); Inc(FOutY,N); if FOutY >= FLineCount then FOutY := FLineCount-1 end;
