@@ -204,6 +204,10 @@ type
     FWriteInput: Boolean;
     FAnsiParser: TAnsiParser;
     FAnsiScreen: TAnsiScreenBuffer;
+    FAnsiHistory: array of TAnsiCell;
+    FAnsiHistoryLines: integer;
+    FAnsiHistoryWidth: integer;
+    FAnsiScrollOffset: integer;
     FAnsiTabs: TAnsiTabStops;
     FAnsiSpecialGraphics: Boolean;
     FAnsiSavedX, FAnsiSavedY: integer;
@@ -255,6 +259,9 @@ type
     procedure EmitAnsiKey(AKey: TAnsiKey; AModifiers: TAnsiKeyModifiers);
     procedure EmitAnsiSound(AKind: TAnsiSoundKind);
     procedure AnsiLineFeed;
+    procedure CaptureAnsiScrollbackLine;
+    procedure ScrollAnsiView(ADelta: integer);
+    function AnsiVisibleCell(AX, AY: integer): TAnsiCell;
     procedure AnsiReverseIndex;
     procedure AnsiEraseLine(AMode: integer);
     procedure AnsiEraseDisplay(AMode: integer);
@@ -2150,6 +2157,18 @@ var
   Handled: Boolean;
 begin
   Result := inherited DoMouseWheel(Shift, WheelDelta, MousePos);
+  { Do not expose legacy scrollback for ANSI mode.  ANSI wheel events are
+    handled only when the application enabled mouse tracking. }
+  if (FEscapeCodeType = esctAnsi) and
+     (FAnsiMouse.TrackingMode = amtNone) then
+  begin
+    if WheelDelta > 0 then
+      ScrollAnsiView(-3)
+    else if WheelDelta < 0 then
+      ScrollAnsiView(3);
+    Result := True;
+    Exit;
+  end;
   if (FEscapeCodeType <> esctAnsi) or
      (FAnsiMouse.TrackingMode = amtNone) or (WheelDelta = 0) then Exit;
   ClientPos := ScreenToClient(MousePos);
@@ -2226,6 +2245,27 @@ procedure TCmdBox.WMVScroll(var message: TLMVScroll);
 var
   CurrentPos: integer;
 begin
+  if FEscapeCodeType = esctAnsi then
+  begin
+    CurrentPos := FAnsiHistoryLines - FAnsiScrollOffset;
+    case message.ScrollCode of
+      SB_TOP: CurrentPos := 0;
+      SB_BOTTOM: CurrentPos := FAnsiHistoryLines;
+      SB_LINEDOWN: Inc(CurrentPos);
+      SB_LINEUP: Dec(CurrentPos);
+      SB_PAGEDOWN: Inc(CurrentPos, FPageHeight);
+      SB_PAGEUP: Dec(CurrentPos, FPageHeight);
+      SB_THUMBPOSITION, SB_THUMBTRACK: CurrentPos := message.Pos;
+      SB_ENDSCROLL: Exit;
+    end;
+    if CurrentPos < 0 then CurrentPos := 0;
+    if CurrentPos > FAnsiHistoryLines then CurrentPos := FAnsiHistoryLines;
+    FAnsiScrollOffset := FAnsiHistoryLines - CurrentPos;
+    FAutoFollow := FAnsiScrollOffset = 0;
+    if HandleAllocated then ScrollBarPosition(SB_VERT, CurrentPos);
+    Invalidate;
+    Exit;
+  end;
   CurrentPos := FLineHeightSum[FTopLine] + FLineOfTopLine;
   case message.ScrollCode of
     SB_TOP: CurrentPos    := 0;
@@ -2932,6 +2972,9 @@ begin
   FOutX   := 0;
   FOutY   := 0;
   if Assigned(FAnsiScreen) then FAnsiScreen.Clear;
+  FAnsiHistoryLines := 0;
+  FAnsiScrollOffset := 0;
+  SetLength(FAnsiHistory, 0);
   if FInput then
     FInputY := 0;
   Invalidate;
@@ -2989,12 +3032,67 @@ begin
   FTerminalColumns := AValue;
 end;
 
+procedure TCmdBox.CaptureAnsiScrollbackLine;
+var X, I: integer;
+begin
+  if not Assigned(FAnsiScreen) or (FAnsiScreen.TopMargin <> 0) or
+     (FAnsiScreen.CursorY <> FAnsiScreen.BottomMargin) then Exit;
+  if FAnsiHistoryWidth <> FAnsiScreen.Width then
+  begin
+    FAnsiHistoryWidth := FAnsiScreen.Width;
+    FAnsiHistoryLines := 0;
+    SetLength(FAnsiHistory, 0);
+  end;
+  if FAnsiHistoryLines >= 10000 then
+  begin
+    for I := 1 to FAnsiHistoryLines - 1 do
+      for X := 0 to FAnsiHistoryWidth - 1 do
+        FAnsiHistory[(I - 1) * FAnsiHistoryWidth + X] :=
+          FAnsiHistory[I * FAnsiHistoryWidth + X];
+    Dec(FAnsiHistoryLines);
+  end;
+  SetLength(FAnsiHistory, (FAnsiHistoryLines + 1) * FAnsiHistoryWidth);
+  for X := 0 to FAnsiHistoryWidth - 1 do
+    FAnsiHistory[FAnsiHistoryLines * FAnsiHistoryWidth + X] :=
+      FAnsiScreen.GetCell(X, FAnsiScreen.TopMargin);
+  Inc(FAnsiHistoryLines);
+  if FAnsiScrollOffset > 0 then
+    Inc(FAnsiScrollOffset);
+end;
+
+procedure TCmdBox.ScrollAnsiView(ADelta: integer);
+var ViewTop, MaxTop: integer;
+begin
+  MaxTop := FAnsiHistoryLines;
+  ViewTop := FAnsiHistoryLines - FAnsiScrollOffset + ADelta;
+  if ViewTop < 0 then ViewTop := 0;
+  if ViewTop > MaxTop then ViewTop := MaxTop;
+  FAnsiScrollOffset := MaxTop - ViewTop;
+  FAutoFollow := FAnsiScrollOffset = 0;
+  if HandleAllocated then ScrollBarPosition(SB_VERT, ViewTop);
+  Invalidate;
+end;
+
+function TCmdBox.AnsiVisibleCell(AX, AY: integer): TAnsiCell;
+var AbsoluteLine: integer;
+begin
+  AbsoluteLine := FAnsiHistoryLines + AY - FAnsiScrollOffset;
+  if (AbsoluteLine >= 0) and (AbsoluteLine < FAnsiHistoryLines) then
+    Exit(FAnsiHistory[AbsoluteLine * FAnsiHistoryWidth + AX]);
+  AbsoluteLine := AbsoluteLine - FAnsiHistoryLines;
+  if (AbsoluteLine < 0) then AbsoluteLine := 0;
+  if AbsoluteLine >= FAnsiScreen.Height then
+    AbsoluteLine := FAnsiScreen.Height - 1;
+  Result := FAnsiScreen.GetCell(AX, AbsoluteLine);
+end;
+
 procedure TCmdBox.AnsiLineFeed;
 begin
   if Assigned(FAnsiScreen) then
   begin
     FAnsiScreen.CursorX := FOutX;
     FAnsiScreen.CursorY := FOutY;
+    CaptureAnsiScrollbackLine;
     FAnsiScreen.LineFeed;
   end;
   AdjustLineHeight(FOutY);
@@ -3577,6 +3675,13 @@ begin
   inherited Resize;
   if Assigned(FAnsiScreen) then
   begin
+    if FAnsiScreen.Width <> FTerminalColumns then
+    begin
+      FAnsiHistoryLines := 0;
+      FAnsiScrollOffset := 0;
+      FAnsiHistoryWidth := FTerminalColumns;
+      SetLength(FAnsiHistory, 0);
+    end;
     if (FCharHeight > 0) and (FClientHeight div FCharHeight > 0) then
       FAnsiScreen.Resize(FTerminalColumns, FClientHeight div FCharHeight)
     else
@@ -3635,6 +3740,20 @@ begin
   FClientHeight := inherited ClientHeight;
   FPageHeight   := FClientHeight div FCharHeight;
   FVisibleLines := FPageHeight + Ord(FClientHeight mod FCharHeight <> 0);
+  if FEscapeCodeType = esctAnsi then
+  begin
+    FVisibleLineCount := FAnsiHistoryLines + FPageHeight;
+    if FAnsiScrollOffset > FAnsiHistoryLines then
+      FAnsiScrollOffset := FAnsiHistoryLines;
+    if HandleAllocated then
+    begin
+      ScrollBarRange(SB_VERT, FVisibleLineCount, FPageHeight);
+      ScrollBarPosition(SB_VERT, FAnsiHistoryLines - FAnsiScrollOffset);
+      ShowScrollBar(Handle, SB_VERT, FVSBVisible);
+    end;
+    Invalidate;
+    Exit;
+  end;
   LH            := UpdateLineHeights(Recalc);
   if LH <> FVisibleLineCount then
   begin
@@ -3669,6 +3788,10 @@ end;
 
 procedure TCmdBox.SetTopLine(Nr: integer);
 begin
+  { ANSI mode owns its viewport and must not be redirected to the legacy
+    logical line buffer by callers such as custom mouse-wheel handlers. }
+  if FEscapeCodeType = esctAnsi then
+    Exit;
   if Nr <> FTopLine then
   begin
     FTopLine := Nr;
@@ -3739,7 +3862,7 @@ begin
         // Verwende FCharHeight / FGraphicCharWidth als Zeichenabmessungen
         for X := 0 to FAnsiScreen.Width - 1 do
         begin
-          Cell := FAnsiScreen.GetCell(X, CurrentLine);
+          Cell := AnsiVisibleCell(X, CurrentLine);
           
           // Hintergrund zeichnen
           Brush.Color := Cell.Background;
@@ -3868,6 +3991,10 @@ begin
   FWriteInput       := True;
   FAnsiParser       := TAnsiParser.Create;
   FAnsiScreen       := TAnsiScreenBuffer.Create(80, 25);
+  FAnsiHistoryLines := 0;
+  FAnsiHistoryWidth := 80;
+  FAnsiScrollOffset := 0;
+  SetLength(FAnsiHistory, 0);
   FAnsiTabs         := TAnsiTabStops.Create(80);
   FAnsiSpecialGraphics := False;
   FAnsiMouse        := TAnsiMouseEncoder.Create;
