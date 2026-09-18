@@ -152,6 +152,13 @@ object WMainForm: TWMainForm
     left = 104
     top = 75
   end
+  object TelnetTimer: TTimer
+    Enabled = False
+    Interval = 50
+    OnTimer = TelnetTimerTimer
+    left = 224
+    top = 75
+  end
   object FontDialog: TFontDialog
     MinFontSize = 0
     MaxFontSize = 0

@@ -1,5 +1,3 @@
-{ Das ist eine automatisch erzeugte Lazarus-Ressourcendatei }
-
 LazarusResources.Add('TWMainForm','FORMDATA',[
   'TPF0'#10'TWMainForm'#9'WMainForm'#4'Left'#3#24#2#6'Height'#3#17#2#3'Top'#3' '
   +#1#5'Width'#3#195#2#7'Caption'#6#27'TCmdBox Example Application'#12'ClientHe'
@@ -43,8 +41,9 @@ LazarusResources.Add('TWMainForm','FORMDATA',[
   +#0#0#6'TTimer'#11'ReaderTimer'#8'Interval'#3#244#1#7'OnTimer'#7#16'ReaderTim'
   +'erTimer'#4'left'#2'B'#3'top'#2'K'#0#0#6'TTimer'#12'ProcessTimer'#7'Enabled'
   +#8#8'Interval'#2'd'#7'OnTimer'#7#17'ProcessTimerTimer'#4'left'#2'h'#3'top'#2
-  +'K'#0#0#11'TFontDialog'#10'FontDialog'#11'MinFontSize'#2#0#11'MaxFontSize'#2
-  +#0#4'left'#3#144#0#3'top'#2'K'#0#0#10'TPopupMenu'#10'PopupMenu1'#4'left'#3
-  +#168#0#3'top'#3#196#0#0#9'TMenuItem'#9'MenuItem1'#7'Caption'#6#12'Nothing he'
-  +'re'#0#0#0#0
+  +'K'#0#0#6'TTimer'#11'TelnetTimer'#7'Enabled'#8#8'Interval'#2'2'#7'OnTimer'#7
+  +#16'TelnetTimerTimer'#4'left'#3#224#0#3'top'#2'K'#0#0#11'TFontDialog'#10'Fon'
+  +'tDialog'#11'MinFontSize'#2#0#11'MaxFontSize'#2#0#4'left'#3#144#0#3'top'#2'K'
+  +#0#0#10'TPopupMenu'#10'PopupMenu1'#4'left'#3#168#0#3'top'#3#196#0#0#9'TMenuI'
+  +'tem'#9'MenuItem1'#7'Caption'#6#12'Nothing here'#0#0#0#0
 ]);
