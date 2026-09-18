@@ -212,6 +212,30 @@ begin
   end;
 end;
 
+procedure TAnsiScreenBuffer.ED(AMode: Integer);
+var X, Y: Integer;
+begin
+  case AMode of
+    1:
+      begin
+        for Y := 0 to FCursorY - 1 do
+          FillRow(Y);
+        for X := 0 to FCursorX do
+          FCells[FCursorY * FWidth + X] := FDefaultCell;
+      end;
+    2, 3:
+      for Y := 0 to FHeight - 1 do
+        FillRow(Y);
+    else
+      begin
+        for X := FCursorX to FWidth - 1 do
+          FCells[FCursorY * FWidth + X] := FDefaultCell;
+        for Y := FCursorY + 1 to FHeight - 1 do
+          FillRow(Y);
+      end;
+  end;
+end;
+
 procedure TAnsiScreenBuffer.LineFeed;
 begin
   if FCursorY = FBottomMargin then ScrollUp

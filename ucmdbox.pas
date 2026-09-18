@@ -3080,6 +3080,12 @@ begin
       for I := FOutY + 1 to FLineCount - 1 do FLines[I].Clear;
     end;
   end;
+  if Assigned(FAnsiScreen) then
+  begin
+    FAnsiScreen.CursorX := FOutX;
+    FAnsiScreen.CursorY := FOutY;
+    FAnsiScreen.ED(AMode);
+  end;
 end;
 
 procedure TCmdBox.EmitAnsiResponse(const AResponse: RawByteString);
