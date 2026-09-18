@@ -2987,6 +2987,12 @@ end;
 
 procedure TCmdBox.AnsiLineFeed;
 begin
+  if Assigned(FAnsiScreen) then
+  begin
+    FAnsiScreen.CursorX := FOutX;
+    FAnsiScreen.CursorY := FOutY;
+    FAnsiScreen.LineFeed;
+  end;
   AdjustLineHeight(FOutY);
   Inc(FOutY);
   if FOutY >= FLineCount then
@@ -2994,11 +3000,22 @@ begin
     ScrollUp;
     FOutY := FLineCount - 1;
   end;
+  if Assigned(FAnsiScreen) then
+  begin
+    FAnsiScreen.CursorX := FOutX;
+    FAnsiScreen.CursorY := FOutY;
+  end;
 end;
 
 procedure TCmdBox.AnsiReverseIndex;
 var I: integer;
 begin
+  if Assigned(FAnsiScreen) then
+  begin
+    FAnsiScreen.CursorX := FOutX;
+    FAnsiScreen.CursorY := FOutY;
+    FAnsiScreen.ReverseIndex;
+  end;
   if FOutY > 0 then Dec(FOutY)
   else
   begin
@@ -3008,6 +3025,11 @@ begin
       FLines[I].OverWrite(FLines[I - 1], 0);
     end;
     FLines[0].Clear;
+  end;
+  if Assigned(FAnsiScreen) then
+  begin
+    FAnsiScreen.CursorX := FOutX;
+    FAnsiScreen.CursorY := FOutY;
   end;
 end;
 
@@ -3249,7 +3271,15 @@ begin
   begin
     if (FAnsiParser.State<>apsGround) or (S[Pp]=#27) then
     begin
-      if FAnsiParser.Feed(S[Pp],Seq) then ExecuteAnsi(Seq);
+      if FAnsiParser.Feed(S[Pp],Seq) then
+      begin
+        ExecuteAnsi(Seq);
+        if Assigned(FAnsiScreen) then
+        begin
+          FAnsiScreen.CursorX := FOutX;
+          FAnsiScreen.CursorY := FOutY;
+        end;
+      end;
       Inc(Pp); Continue;
     end;
     if FAnsiTextEncoding = ateCP437 then
@@ -3267,14 +3297,21 @@ begin
     end;
     if L=1 then case S[Pp] of
       #7: EmitAnsiSound(askBell);
-      #8: if FOutX>0 then Dec(FOutX);
+      #8: begin
+        if FOutX>0 then Dec(FOutX);
+        if Assigned(FAnsiScreen) then FAnsiScreen.CursorX := FOutX;
+      end;
       #9: begin
         if Assigned(FAnsiTabs) then FOutX := FAnsiTabs.NextStop(FOutX)
         else FOutX:=((FOutX div 8)+1)*8;
-        if FOutX>=FTerminalColumns then FOutX:=FTerminalColumns-1
+        if FOutX>=FTerminalColumns then FOutX:=FTerminalColumns-1;
+        if Assigned(FAnsiScreen) then FAnsiScreen.CursorX := FOutX;
       end;
       #10,#11,#12: AnsiLineFeed;
-      #13: FOutX:=0;
+      #13: begin
+        FOutX:=0;
+        if Assigned(FAnsiScreen) then FAnsiScreen.CursorX := 0;
+      end;
       else begin
         if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
         FC:=FCurrentColor; BC:=FCurrentBackground;
