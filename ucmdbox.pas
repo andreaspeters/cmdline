@@ -3707,7 +3707,13 @@ begin
       FillRect(0, 0, FClientWidth, FClientHeight);
       Exit;
     end;
-    
+
+    { Ensure whole actual client area gets FBackGroundColor before branch
+      drawing so no raw window background shows through between painted cell/line areas. }
+    Brush.Color := FBackGroundColor;
+    Brush.Style := bsSolid;
+    FillRect(0, 0, FClientWidth, FClientHeight);
+
     // Wenn im ANSI-Modus, zeichne direkt aus FAnsiScreen
     if (FEscapeCodeType = esctAnsi) and Assigned(FAnsiScreen) then
     begin
