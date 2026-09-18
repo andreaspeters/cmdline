@@ -49,6 +49,7 @@ type
     procedure ReverseIndex;
     procedure ScrollUp(AAmount: Integer = 1);
     procedure ScrollDown(AAmount: Integer = 1);
+    procedure ED(AMode: Integer);
     property Width: Integer read FWidth;
     property Height: Integer read FHeight;
     property CursorX: Integer read FCursorX write SetCursorX;
