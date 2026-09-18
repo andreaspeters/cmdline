@@ -36,6 +36,7 @@ type
     constructor Create(AWidth, AHeight: Integer);
     procedure Resize(AWidth, AHeight: Integer);
     procedure Clear;
+    procedure SetDefaultBackground(AColor: Cardinal);
     procedure SetCell(AX, AY: Integer; const ACell: TAnsiCell);
     function GetCell(AX, AY: Integer): TAnsiCell;
     procedure WriteGlyph(const AGlyph: UTF8String);
@@ -142,6 +143,17 @@ begin
     FCells[I] := FDefaultCell;
   FCursorX := 0;
   FCursorY := 0;
+end;
+
+procedure TAnsiScreenBuffer.SetDefaultBackground(AColor: Cardinal);
+var I: Integer;
+    OldBackground: Cardinal;
+begin
+  OldBackground := FDefaultCell.Background;
+  FDefaultCell.Background := AColor;
+  for I := 0 to Length(FCells) - 1 do
+    if FCells[I].Background = OldBackground then
+      FCells[I].Background := AColor;
 end;
 
 procedure TAnsiScreenBuffer.FillRow(AY: Integer);

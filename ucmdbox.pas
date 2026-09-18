@@ -2299,6 +2299,10 @@ begin
   if c <> FBackGroundColor then
   begin
     FBackGroundColor := c;
+    FDefaultBackGround := c;
+    FCurrentBackGround := c;
+    if Assigned(FAnsiScreen) then
+      FAnsiScreen.SetDefaultBackground(Cardinal(c));
     Invalidate;
   end;
 end;
