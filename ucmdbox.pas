@@ -3314,7 +3314,11 @@ begin
       #10,#11,#12: AnsiLineFeed;
       #13: begin
         FOutX:=0;
-        if Assigned(FAnsiScreen) then FAnsiScreen.CursorX := 0;
+        if Assigned(FAnsiScreen) then
+        begin
+          FAnsiScreen.CursorX := 0;
+          FAnsiScreen.CursorY := FOutY;
+        end;
       end;
       else begin
         if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
@@ -3719,8 +3723,11 @@ begin
     begin
       // Zeichne jeden sichtbaren Bereich der ANSI-Canvas
       m    := FVisibleLines - 1;
-      y    := -FLineOfTopLine;
-      CurrentLine := FTopLine;
+      { The ANSI buffer is already a viewport and scrolls itself.  Do not
+        apply the legacy logical-line offset here; FTopLine belongs to the
+        1000-line CmdBox buffer and can otherwise skip ANSI rows. }
+      y    := 0;
+      CurrentLine := 0;
       while (y <= m) and (CurrentLine < FAnsiScreen.Height) do
       begin
         // Verwende FCharHeight / FGraphicCharWidth als Zeichenabmessungen
