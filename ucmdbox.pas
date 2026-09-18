@@ -76,7 +76,8 @@ interface
 
 uses Classes, SysUtils, Types, ExtCtrls, Controls, Graphics, Forms, LCLType,
      LCLIntf, lmessages, lresources, ClipBrd, LCLProc, LAZUtf8, ansi_parser,
-     ansi_mouse, cp437_codec;
+     ansi_mouse, cp437_codec, ansi_screen, ansi_input, ansi_sound,
+     ansi_tabs, ansi_width, ansi_charset;
 
 type
   TCaretType = (cartLine, cartSubBar, cartBigBar, cartUser);
@@ -94,6 +95,12 @@ type
 
   TAnsiMouseReportEvent = procedure(ACmdBox: TCmdBox;
     const AReport: string) of object;
+  TAnsiResponseEvent = procedure(ACmdBox: TCmdBox;
+    const AResponse: RawByteString) of object;
+  TAnsiKeyReportEvent = procedure(ACmdBox: TCmdBox;
+    const AReport: RawByteString) of object;
+  TAnsiSoundEvent = procedure(ACmdBox: TCmdBox;
+    AKind: TAnsiSoundKind) of object;
 
 type
   TColorstring = class;
@@ -196,6 +203,9 @@ type
     FWrapMode:  TWrapMode;
     FWriteInput: Boolean;
     FAnsiParser: TAnsiParser;
+    FAnsiScreen: TAnsiScreenBuffer;
+    FAnsiTabs: TAnsiTabStops;
+    FAnsiSpecialGraphics: Boolean;
     FAnsiSavedX, FAnsiSavedY: integer;
     FAnsiSavedColor, FAnsiSavedBackground: TColor;
     FAnsiSavedAttrib: TCharAttrib;
@@ -205,6 +215,9 @@ type
     FAnsiMouse: TAnsiMouseEncoder;
     FAnsiPressedButton: integer;
     FOnAnsiMouseReport: TAnsiMouseReportEvent;
+    FOnAnsiResponse: TAnsiResponseEvent;
+    FOnAnsiKeyReport: TAnsiKeyReportEvent;
+    FOnAnsiSound: TAnsiSoundEvent;
     FAnsiTextEncoding: TAnsiTextEncoding;
     FAnsiBBSFontName: string;
     FAnsiBBSFontSize: integer;
@@ -238,6 +251,9 @@ type
     procedure IntWrite;
     procedure AnsiWrite(const S: string);
     procedure ExecuteAnsi(const ASequence: TAnsiSequence);
+    procedure EmitAnsiResponse(const AResponse: RawByteString);
+    procedure EmitAnsiKey(AKey: TAnsiKey; AModifiers: TAnsiKeyModifiers);
+    procedure EmitAnsiSound(AKind: TAnsiSoundKind);
     procedure AnsiLineFeed;
     procedure AnsiReverseIndex;
     procedure AnsiEraseLine(AMode: integer);
@@ -340,6 +356,11 @@ type
       write SetAnsiBBSFontSize default 12;
     property OnAnsiMouseReport: TAnsiMouseReportEvent read FOnAnsiMouseReport
       write FOnAnsiMouseReport;
+    property OnAnsiResponse: TAnsiResponseEvent read FOnAnsiResponse
+      write FOnAnsiResponse;
+    property OnAnsiKeyReport: TAnsiKeyReportEvent read FOnAnsiKeyReport
+      write FOnAnsiKeyReport;
+    property OnAnsiSound: TAnsiSoundEvent read FOnAnsiSound write FOnAnsiSound;
     property DoubleBuffered default True;
     property OnKeyDown;
     property OnKeyUp;
@@ -2298,7 +2319,7 @@ end;
 
 function TCmdBox.SelectAnsiBBSFont: string;
 const
-  Fallbacks: array[0..4] of string = ('Perfect DOS VGA 437', 'Terminus',
+  Fallbacks: array[0..5] of string = ('Perfect DOS VGA 437', 'Codepage 437', 'Terminus',
     'DejaVu Sans Mono', 'Courier New', 'Monospace');
 var
   I: integer;
@@ -2511,7 +2532,38 @@ procedure TCmdBox.KeyDown(var Key: word; Shift: TShiftState);
 var
   s: string;
   i: integer;
+  AKey: TAnsiKey;
+  HaveKey: Boolean;
+  AModifiers: TAnsiKeyModifiers;
 begin
+  if (FEscapeCodeType = esctAnsi) and Assigned(FOnAnsiKeyReport) then
+  begin
+    HaveKey := True;
+    case Key of
+      VK_UP: AKey := akUp; VK_DOWN: AKey := akDown;
+      VK_LEFT: AKey := akLeft; VK_RIGHT: AKey := akRight;
+      VK_HOME: AKey := akHome; VK_END: AKey := akEnd;
+      VK_INSERT: AKey := akInsert; VK_DELETE: AKey := akDelete;
+      VK_PRIOR: AKey := akPageUp; VK_NEXT: AKey := akPageDown;
+      VK_F1: AKey := akF1; VK_F2: AKey := akF2; VK_F3: AKey := akF3;
+      VK_F4: AKey := akF4; VK_F5: AKey := akF5; VK_F6: AKey := akF6;
+      VK_F7: AKey := akF7; VK_F8: AKey := akF8; VK_F9: AKey := akF9;
+      VK_F10: AKey := akF10; VK_F11: AKey := akF11; VK_F12: AKey := akF12;
+      VK_RETURN: AKey := akEnter; VK_BACK: AKey := akBackspace;
+      VK_TAB: AKey := akTab; VK_ESCAPE: AKey := akEscape;
+      else HaveKey := False;
+    end;
+    if HaveKey then
+    begin
+      AModifiers := [];
+      if ssShift in Shift then Include(AModifiers, akmShift);
+      if ssAlt in Shift then Include(AModifiers, akmAlt);
+      if ssCtrl in Shift then Include(AModifiers, akmCtrl);
+      EmitAnsiKey(AKey, AModifiers);
+      Key := 0;
+      Exit;
+    end;
+  end;
   if not FInput then
     Exit;
   case Key of
@@ -2875,6 +2927,7 @@ begin
   FInputY := 0;
   FOutX   := 0;
   FOutY   := 0;
+  if Assigned(FAnsiScreen) then FAnsiScreen.Clear;
   if FInput then
     FInputY := 0;
   Invalidate;
@@ -3003,6 +3056,27 @@ begin
   end;
 end;
 
+procedure TCmdBox.EmitAnsiResponse(const AResponse: RawByteString);
+begin
+  if Assigned(FOnAnsiResponse) then FOnAnsiResponse(Self, AResponse);
+end;
+
+procedure TCmdBox.EmitAnsiKey(AKey: TAnsiKey; AModifiers: TAnsiKeyModifiers);
+var E: TAnsiInputEncoder; Report: RawByteString;
+begin
+  if not Assigned(FOnAnsiKeyReport) then Exit;
+  E := TAnsiInputEncoder.Create;
+  try
+    Report := E.EncodeKey(AKey, AModifiers);
+    if Report <> '' then FOnAnsiKeyReport(Self, Report);
+  finally E.Free end;
+end;
+
+procedure TCmdBox.EmitAnsiSound(AKind: TAnsiSoundKind);
+begin
+  if Assigned(FOnAnsiSound) then FOnAnsiSound(Self, AKind);
+end;
+
 procedure TCmdBox.ExecuteAnsi(const ASequence: TAnsiSequence);
 var I, N, P, X, Y: integer; FC, BC: TColor;
   function Param(AIndex, ADefault: integer; AZeroIsDefault: boolean = False): integer;
@@ -3032,6 +3106,8 @@ begin
       'D': AnsiLineFeed;
       'M': AnsiReverseIndex;
       'E': begin FOutX := 0; AnsiLineFeed end;
+      '0': if ASequence.Intermediates = '(' then FAnsiSpecialGraphics := True;
+      'B': if ASequence.Intermediates = '(' then FAnsiSpecialGraphics := False;
       'c': begin
         Clear; FCurrentColor := FDefaultColor; FCurrentBackground := FDefaultBackground;
         FCurrentAttrib := []; FAnsiAutoWrap := True; FAnsiCursorVisible := True;
@@ -3046,6 +3122,8 @@ begin
     for I := 0 to High(ASequence.Params) do
       case ASequence.Params[I] of
         7: FAnsiAutoWrap := ASequence.FinalChar = 'h';
+        6: if Assigned(FAnsiScreen) then
+             FAnsiScreen.SetOriginMode(ASequence.FinalChar = 'h');
         25: FAnsiCursorVisible := ASequence.FinalChar = 'h';
         9, 1000, 1002, 1003, 1006:
           begin
@@ -3062,6 +3140,15 @@ begin
   // CSI < 64 ; x ; y M would otherwise be interpreted as "delete 64 lines".
   if ASequence.PrivateMarker <> #0 then Exit;
   case ASequence.FinalChar of
+    'c': EmitAnsiResponse(#27 + '[?62;1;2;6;9c');
+    'n': case Param(0, 0) of
+      5: EmitAnsiResponse(#27 + '[0n');
+      6: EmitAnsiResponse(#27 + '[' + IntToStr(FOutY + 1) + ';' +
+        IntToStr(FOutX + 1) + 'R');
+    end;
+    'r': if Assigned(FAnsiScreen) then
+      FAnsiScreen.SetScrollRegion(Param(0, 1, True) - 1,
+        Param(1, FAnsiScreen.Height, True) - 1);
     'A': begin N := Param(0,1,True); Dec(FOutY,N); if FOutY < 0 then FOutY := 0 end;
     'B','e': begin N := Param(0,1,True); Inc(FOutY,N); if FOutY >= FLineCount then FOutY := FLineCount-1 end;
     'C','a': begin Inc(FOutX,Param(0,1,True)); if FOutX >= FTerminalColumns then FOutX := FTerminalColumns-1 end;
@@ -3139,7 +3226,24 @@ end;
 procedure TCmdBox.AnsiWrite(const S: string);
 var Pp, L: integer; Seq: TAnsiSequence; FC, BC: TColor;
   Glyph: UTF8String;
+  function ScreenAttributes: TAnsiAttributes;
+  begin
+    Result := [];
+    if charaBold in FCurrentAttrib then Include(Result, aaBold);
+    if charaFaint in FCurrentAttrib then Include(Result, aaDim);
+    if charaItalic in FCurrentAttrib then Include(Result, aaItalic);
+    if charaUnderline in FCurrentAttrib then Include(Result, aaUnderline);
+    if charaBlink in FCurrentAttrib then Include(Result, aaBlink);
+    if charaInverse in FCurrentAttrib then Include(Result, aaInverse);
+    if charaConceal in FCurrentAttrib then Include(Result, aaConceal);
+    if charaStrike in FCurrentAttrib then Include(Result, aaStrike);
+  end;
 begin
+  if Assigned(FAnsiScreen) then
+  begin
+    FAnsiScreen.CursorX := FOutX;
+    FAnsiScreen.CursorY := FOutY;
+  end;
   Pp:=1;
   while Pp<=Length(S) do
   begin
@@ -3158,11 +3262,17 @@ begin
       L:=UTF8CharacterLength(@S[Pp]);
       if L<1 then L:=1;
       Glyph := Copy(S, Pp, L);
+      if FAnsiSpecialGraphics and (L = 1) and (Ord(S[Pp]) >= 32) then
+        Glyph := DecodeDECSpecialGraphics(S[Pp]);
     end;
     if L=1 then case S[Pp] of
-      #7: ;
+      #7: EmitAnsiSound(askBell);
       #8: if FOutX>0 then Dec(FOutX);
-      #9: begin FOutX:=((FOutX div 8)+1)*8; if FOutX>=FTerminalColumns then FOutX:=FTerminalColumns-1 end;
+      #9: begin
+        if Assigned(FAnsiTabs) then FOutX := FAnsiTabs.NextStop(FOutX)
+        else FOutX:=((FOutX div 8)+1)*8;
+        if FOutX>=FTerminalColumns then FOutX:=FTerminalColumns-1
+      end;
       #10,#11,#12: AnsiLineFeed;
       #13: FOutX:=0;
       else begin
@@ -3170,15 +3280,19 @@ begin
         FC:=FCurrentColor; BC:=FCurrentBackground;
         if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
         if charaConceal in FCurrentAttrib then FC:=BC;
-        FLines[FOutY].OverWrite(Glyph,FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
+        FLines[FOutY].OverWrite(Glyph,FOutX,FC,BC,FCurrentAttrib); Inc(FOutX, AnsiUTF8Width(Glyph));
+        if Assigned(FAnsiScreen) then FAnsiScreen.WriteStyledGlyph(Glyph,
+          Cardinal(FC), Cardinal(BC), ScreenAttributes)
       end
     end else begin
-      if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
-      FC:=FCurrentColor; BC:=FCurrentBackground;
-      if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
-      if charaConceal in FCurrentAttrib then FC:=BC;
-      FLines[FOutY].OverWrite(Glyph,FOutX,FC,BC,FCurrentAttrib); Inc(FOutX)
-    end;
+   if FAnsiAutoWrap and (FOutX>=FTerminalColumns) then begin FOutX:=0; AnsiLineFeed end;
+   FC:=FCurrentColor; BC:=FCurrentBackground;
+   if charaInverse in FCurrentAttrib then begin FC:=FCurrentBackground; BC:=FCurrentColor end;
+   if charaConceal in FCurrentAttrib then FC:=BC;
+   FLines[FOutY].OverWrite(Glyph,FOutX,FC,BC,FCurrentAttrib); Inc(FOutX, AnsiUTF8Width(Glyph));
+   if Assigned(FAnsiScreen) then FAnsiScreen.WriteStyledGlyph(Glyph,
+          Cardinal(FC), Cardinal(BC), ScreenAttributes)
+ end;
     Inc(Pp,L)
   end;
   FCaretX:=FOutX;
@@ -3410,6 +3524,13 @@ end;
 procedure TCmdBox.Resize;
 begin
   inherited Resize;
+  if Assigned(FAnsiScreen) then
+  begin
+    if (FCharHeight > 0) and (FClientHeight div FCharHeight > 0) then
+      FAnsiScreen.Resize(FTerminalColumns, FClientHeight div FCharHeight)
+    else
+      FAnsiScreen.Resize(FTerminalColumns, 1);
+  end;
   AdjustScrollBars(True);
 end;
 
@@ -3532,6 +3653,8 @@ procedure TCmdBox.Paint;
 var y           : Integer;
     m           : Integer;
     CurrentLine : Integer;
+    Cell: TAnsiCell;
+    X: Integer;
 begin
   inherited Paint;
   with Canvas do
@@ -3543,42 +3666,96 @@ begin
       FillRect(0, 0, FClientWidth, FClientHeight);
       Exit;
     end;
-    Font := FFont;
-    Brush.Style := bsSolid;
-    m    := FVisibleLines - 1;
-    y    := -FLineOfTopLine;
-    CurrentLine := FTopLine;
-    while (y <= m) and (CurrentLine < LineCount) do
+    
+    // Wenn im ANSI-Modus, zeichne direkt aus FAnsiScreen
+    if (FEscapeCodeType = esctAnsi) and Assigned(FAnsiScreen) then
     begin
-      FLines[CurrentLine].LineOutAndFill(Canvas, 0, y * FCharHeight, 0,
-        FClientWidth, FCharHeight, FGraphicCharWidth, -1, FBackGroundColor, FCaretColor,
-        FCaretHeight, FCaretWidth, FCaretYShift, False, FCaretVisible);
-      if (FInput) and (FInputY = CurrentLine) then
+      // Zeichne jeden sichtbaren Bereich der ANSI-Canvas
+      m    := FVisibleLines - 1;
+      y    := -FLineOfTopLine;
+      CurrentLine := FTopLine;
+      while (y <= m) and (CurrentLine < FAnsiScreen.Height) do
       begin
-        if FInputIsPassWord then
+        // Verwende FCharHeight / FGraphicCharWidth als Zeichenabmessungen
+        for X := 0 to FAnsiScreen.Width - 1 do
         begin
-          FInputBuffer.LineOutAndFill(Canvas, 0, y * FCharHeight, 0, FClientWidth,
-            FCharHeight, FGraphicCharWidth, FCaretX, FBackGroundColor, FCaretColor,
-            FCaretHeight, FCaretWidth, FCaretYShift,
-            FCaretVisible and Focused and FAnsiCursorVisible, FCaretVisible);
-        end
-        else
-        begin
-          FInputBuffer.LineOutAndFill(Canvas, 0, y * FCharHeight, 0, FClientWidth,
-            FCharHeight, FGraphicCharWidth, FCaretX, FBackGroundColor, FCaretColor,
-            FCaretHeight, FCaretWidth, FCaretYShift,
-            FCaretVisible and Focused and FAnsiCursorVisible, FCaretVisible);
+          Cell := FAnsiScreen.GetCell(X, CurrentLine);
+          
+          // Hintergrund zeichnen
+          Brush.Color := Cell.Background;
+          Brush.Style := bsSolid;
+          FillRect(X * FGraphicCharWidth, y * FCharHeight, 
+                   (X + 1) * FGraphicCharWidth, (y + 1) * FCharHeight);
+          
+          // Text zeichnen wenn nicht leer
+          if Cell.Glyph <> '' then
+          begin
+            Font.Color := Cell.Foreground;
+            Font.Style := [];
+            
+            // Attribute berücksichtigen
+            if aaBold in Cell.Attributes then Font.Style := Font.Style + [fsBold];
+            if aaItalic in Cell.Attributes then Font.Style := Font.Style + [fsItalic];
+            if aaUnderline in Cell.Attributes then Font.Style := Font.Style + [fsUnderline];
+            
+            // Schriftart ändern falls nötig (nur für spezielle Attribute)
+            TextOut(X * FGraphicCharWidth, y * FCharHeight, Cell.Glyph);
+          end;
         end;
+        
+        Inc(y, 1);  // ANSI-Zeilen sind immer eine Zeile hoch
+        Inc(CurrentLine);
       end;
-      Inc(y, FLineHeights[CurrentLine]);
-      Inc(CurrentLine);
-    end;
-    y := y * FCharHeight;
-    if y < FClientHeight then
+      
+      // Hintergrund füllen wenn nötig
+      y := y * FCharHeight;
+      if y < FClientHeight then
+      begin
+        Brush.Color := FBackGroundColor;
+        Brush.Style := bsSolid;
+        FillRect(0, y, FClientWidth, FClientHeight);
+      end;
+    end
+    else
     begin
-      Brush.Color := FBackGroundColor;
+      // Altes Verhalten für CmdBox-Modus
+      Font := FFont;
       Brush.Style := bsSolid;
-      FillRect(0, y, FClientWidth, FClientHeight);
+      m    := FVisibleLines - 1;
+      y    := -FLineOfTopLine;
+      CurrentLine := FTopLine;
+      while (y <= m) and (CurrentLine < LineCount) do
+      begin
+        FLines[CurrentLine].LineOutAndFill(Canvas, 0, y * FCharHeight, 0,
+          FClientWidth, FCharHeight, FGraphicCharWidth, -1, FBackGroundColor, FCaretColor,
+          FCaretHeight, FCaretWidth, FCaretYShift, False, FCaretVisible);
+        if (FInput) and (FInputY = CurrentLine) then
+        begin
+          if FInputIsPassWord then
+          begin
+            FInputBuffer.LineOutAndFill(Canvas, 0, y * FCharHeight, 0, FClientWidth,
+              FCharHeight, FGraphicCharWidth, FCaretX, FBackGroundColor, FCaretColor,
+              FCaretHeight, FCaretWidth, FCaretYShift,
+              FCaretVisible and Focused and FAnsiCursorVisible, FCaretVisible);
+          end
+          else
+          begin
+            FInputBuffer.LineOutAndFill(Canvas, 0, y * FCharHeight, 0, FClientWidth,
+              FCharHeight, FGraphicCharWidth, FCaretX, FBackGroundColor, FCaretColor,
+              FCaretHeight, FCaretWidth, FCaretYShift,
+              FCaretVisible and Focused and FAnsiCursorVisible, FCaretVisible);
+          end;
+        end;
+        Inc(y, FLineHeights[CurrentLine]);
+        Inc(CurrentLine);
+      end;
+      y := y * FCharHeight;
+      if y < FClientHeight then
+      begin
+        Brush.Color := FBackGroundColor;
+        Brush.Style := bsSolid;
+        FillRect(0, y, FClientWidth, FClientHeight);
+      end;
     end;
   end;
 end;
@@ -3630,6 +3807,9 @@ begin
   FInputVisible     := False;
   FWriteInput       := True;
   FAnsiParser       := TAnsiParser.Create;
+  FAnsiScreen       := TAnsiScreenBuffer.Create(80, 25);
+  FAnsiTabs         := TAnsiTabStops.Create(80);
+  FAnsiSpecialGraphics := False;
   FAnsiMouse        := TAnsiMouseEncoder.Create;
   FAnsiPressedButton := -1;
   FAnsiAutoWrap     := True;
@@ -3695,6 +3875,8 @@ begin
   System.DoneCriticalSection(FLock);
   FStringBuffer.Free;
   FAnsiParser.Free;
+  FAnsiScreen.Free;
+  FAnsiTabs.Free;
   FAnsiMouse.Free;
   for i := 0 to FLineCount - 1 do FLines[i].Free;
   for i := 0 to FHistoryMax - 1 do FHistory[i].Free;
